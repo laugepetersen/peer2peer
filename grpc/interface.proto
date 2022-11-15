@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package p2p;
+option go_package = "https://github.com/NaddiNadja/peer-to-peer;ping";
+
+// protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative grpc/interface.proto
+
+service PeerService {
+  rpc AskPermission (Request) returns (Reply) {}
+  rpc GivePermission (Request) returns (Request) {}
+}
+
+message Request {
+    int32 port = 1;
+    int32 lamportTimestamp = 2;
+}
+
+message Reply {
+  int32 port = 1;  
+  bool answer = 2;
+}
