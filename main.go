@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	p2p "p2p/grpc"
@@ -14,6 +15,16 @@ import (
 
 	"google.golang.org/grpc"
 )
+
+type peer struct {
+	p2p.UnimplementedPeerServiceServer
+	Port             int32
+	Clients          map[int32]p2p.PeerServiceClient
+	State            State
+	LamportTimestamp int32
+	CSQueue          map[int32]int32
+	ctx              context.Context
+}
 
 type State string
 
@@ -33,7 +44,6 @@ func main() {
 		ports = append(ports, int32(arg))
 	}
 
-	// Don't touch
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -54,6 +64,7 @@ func main() {
 		log.Fatalf("Failed to listen on port: %v", err)
 	}
 
+	// New server
 	grpcServer := grpc.NewServer()
 	p2p.RegisterPeerServiceServer(grpcServer, peer)
 
@@ -74,7 +85,7 @@ func main() {
 			continue
 		}
 
-		// Don't touch
+		// Dial
 		var conn *grpc.ClientConn
 		conn, err := grpc.Dial(fmt.Sprintf(":%v", nodePort), grpc.WithInsecure(), grpc.WithBlock())
 		defer conn.Close()
@@ -87,10 +98,10 @@ func main() {
 		peer.Clients[nodePort] = client
 		peer.LamportTimestamp += 1
 
-		fmt.Printf("|– Successfully connected to %v \n", nodePort)
+		fmt.Printf("|-(%v) Successfully connected to %v \n", peer.LamportTimestamp, nodePort)
 	}
 
-	// Aggree with network of clients
+	// Aggree with network of clients on "enter"
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		peer.AskNetworkForPermission()
@@ -103,34 +114,38 @@ func (p *peer) AskNetworkForPermission() {
 	p.SetState(WANTED)
 
 	fmt.Println("Asking peers for permision:")
-
+	
 	// Ask all clients in network
 	for port, client := range p.Clients {
+		
+		p.LamportTimestamp += 1
 		req := &p2p.Request{
 			Port:             p.Port,
 			LamportTimestamp: p.LamportTimestamp,
 		}
 
 		reply, err := client.AskPermission(p.ctx, req)
-
+		
 		if err != nil {
 			log.Fatalf("Error in AskPermission: %v", err)
 		}
 
+		p.LamportTimestamp = max(p.LamportTimestamp, reply.LamportTimestamp) + 1
+
 		if reply.Answer == false {
-			fmt.Printf("|- Permisson denied by Client:%v \n", port)
+			fmt.Printf("|-(%v) Permisson denied by Client:%v \n", p.LamportTimestamp, port)
 			allowed = false
 		}
 
 		if reply.Answer == true {
-			fmt.Printf("|- Successfully got permisson by Client:%v \n", port)
+			fmt.Printf("|-(%v) Successfully got permisson by Client:%v \n", p.LamportTimestamp, port)
 		}
 	}
 
 	if allowed == true {
 		p.EnterCriticalSection()
 	} else {
-		fmt.Println("|- Waiting for my turn to access TCS...")
+		fmt.Printf("|-(%v) Waiting for my turn to access TCS...\n", p.LamportTimestamp)
 	}
 }
 
@@ -141,9 +156,11 @@ func (p *peer) SetState(s State) {
 func (p *peer) EnterCriticalSection() {
 	p.SetState(HELD)
 	defer p.SetState(FREE)
-	fmt.Println("|- ** Accessing TCS! **")
+	fmt.Printf("|-(%v) ** Accessing TCS! **\n", p.LamportTimestamp)
 	time.Sleep(time.Second * 5) // Hold for 5 sec.
-	fmt.Println("|- ** Left TCS! **")
+	fmt.Printf("|-(%v) ** Left TCS! **\n", p.LamportTimestamp)
+	
+	p.LamportTimestamp += 1
 
 	// Grant access to waiting client next in queue
 	if len(p.CSQueue) > 0 {
@@ -155,7 +172,8 @@ func (p *peer) EnterCriticalSection() {
 			return p.CSQueue[queuePorts[i]] < p.CSQueue[queuePorts[j]]
 		})
 		for i := 0; i < len(queuePorts); i++ {
-			fmt.Printf("|- Passing access to Client:%v in queue! \n", queuePorts[i])
+			p.LamportTimestamp += 1
+			fmt.Printf("|-(%v) Passing access to Client:%v in queue! \n", p.LamportTimestamp, queuePorts[i])
 			clientFromPort := p.Clients[queuePorts[i]]
 			clientFromPort.GivePermission(p.ctx, &p2p.Request{Port: p.Port, LamportTimestamp: p.LamportTimestamp})
 		}
@@ -163,47 +181,47 @@ func (p *peer) EnterCriticalSection() {
 }
 
 func (p *peer) GivePermission(ctx context.Context, in *p2p.Request) (*p2p.Request, error) {
-	fmt.Printf("|- Permission to TCS granted by Client:%v \n", in.Port)
+
+	p.LamportTimestamp = max(p.LamportTimestamp, in.LamportTimestamp) + 1
+
+	fmt.Printf("|-(%v) Permission to TCS granted by Client:%v \n", p.LamportTimestamp, in.Port)
 	if p.State == WANTED {
 		p.EnterCriticalSection()
 	} else {
-		fmt.Printf("|- State is no longer wanted \n")
+		fmt.Printf("|-(%v) State is no longer wanted \n", p.LamportTimestamp)
 	}
 	return &p2p.Request{}, nil
 }
 
 func (p *peer) AskPermission(ctx context.Context, in *p2p.Request) (*p2p.Reply, error) {
+
+	p.LamportTimestamp = max(p.LamportTimestamp, in.LamportTimestamp) + 1
+
 	if p.State == HELD {
-		fmt.Printf("|- Added Client:%v to queue \n", in.Port)
+		fmt.Printf("|-(%v) Added Client:%v to queue \n", p.LamportTimestamp, in.Port)
 		p.CSQueue[in.Port] = in.LamportTimestamp
-		return &p2p.Reply{Port: p.Port, Answer: false}, nil
+		return &p2p.Reply{Port: p.Port, Answer: false, LamportTimestamp: p.LamportTimestamp}, nil 
 	}
 	if p.State == WANTED {
 		if in.LamportTimestamp < p.LamportTimestamp {
-			return &p2p.Reply{Port: p.Port, Answer: true}, nil
+			return &p2p.Reply{Port: p.Port, Answer: true, LamportTimestamp: p.LamportTimestamp}, nil 
 		} else if in.LamportTimestamp == p.LamportTimestamp {
 			if in.Port < p.Port {
-				return &p2p.Reply{Port: p.Port, Answer: true}, nil
+				return &p2p.Reply{Port: p.Port, Answer: true, LamportTimestamp: p.LamportTimestamp}, nil
 			} else {
-				fmt.Printf("|- Added Client:%v to queue \n", in.Port)
+				fmt.Printf("|-(%v) Added Client:%v to queue \n", p.LamportTimestamp, in.Port)
 				p.CSQueue[in.Port] = in.LamportTimestamp
-				return &p2p.Reply{Port: p.Port, Answer: false}, nil
+				return &p2p.Reply{Port: p.Port, Answer: false, LamportTimestamp: p.LamportTimestamp}, nil
 			}
 		} else {
-			fmt.Printf("|- Added Client:%v to queue \n", in.Port)
+			fmt.Printf("|-(%v) Added Client:%v to queue \n", p.LamportTimestamp, in.Port)
 			p.CSQueue[in.Port] = in.LamportTimestamp
-			return &p2p.Reply{Port: p.Port, Answer: false}, nil
+			return &p2p.Reply{Port: p.Port, Answer: false, LamportTimestamp: p.LamportTimestamp}, nil
 		}
 	}
-	return &p2p.Reply{Port: p.Port, Answer: true}, nil
+	return &p2p.Reply{Port: p.Port, Answer: true, LamportTimestamp: p.LamportTimestamp}, nil
 }
 
-type peer struct {
-	p2p.UnimplementedPeerServiceServer
-	Port             int32
-	Clients          map[int32]p2p.PeerServiceClient
-	State            State
-	LamportTimestamp int32
-	CSQueue          map[int32]int32
-	ctx              context.Context
+func max(ownTimestamp int32, theirTimestamp int32) int32 {
+	return int32(math.Max(float64(ownTimestamp), float64(theirTimestamp)))
 }

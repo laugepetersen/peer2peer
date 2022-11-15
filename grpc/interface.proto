@@ -16,6 +16,7 @@ message Request {
 }
 
 message Reply {
-  int32 port = 1;  
-  bool answer = 2;
+  int32 port = 1; 
+  int32 lamportTimestamp = 2;
+  bool answer = 3;
 }
