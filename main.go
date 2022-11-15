@@ -113,7 +113,7 @@ func (p *peer) AskNetworkForPermission() {
 	allowed := true
 	p.SetState(WANTED)
 
-	fmt.Println("Asking peers for permision:")
+	fmt.Println("Asking peers for permission:")
 	
 	// Ask all clients in network
 	for port, client := range p.Clients {
@@ -133,12 +133,12 @@ func (p *peer) AskNetworkForPermission() {
 		p.LamportTimestamp = max(p.LamportTimestamp, reply.LamportTimestamp) + 1
 
 		if reply.Answer == false {
-			fmt.Printf("|-(%v) Permisson denied by Client:%v \n", p.LamportTimestamp, port)
+			fmt.Printf("|-(%v) Permission denied by Client:%v \n", p.LamportTimestamp, port)
 			allowed = false
 		}
 
 		if reply.Answer == true {
-			fmt.Printf("|-(%v) Successfully got permisson by Client:%v \n", p.LamportTimestamp, port)
+			fmt.Printf("|-(%v) Successfully got permission by Client:%v \n", p.LamportTimestamp, port)
 		}
 	}
 
